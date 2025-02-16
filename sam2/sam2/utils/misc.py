@@ -12,6 +12,7 @@ import numpy as np
 import torch
 from PIL import Image
 from tqdm import tqdm
+import cv2
 
 
 def get_sdpa_settings():
@@ -168,6 +169,45 @@ class AsyncVideoFrameLoader:
     def __len__(self):
         return len(self.images)
 
+def load_video_frames_from_images(
+    video_path,
+    image_size,
+    offload_video_to_cpu,
+    img_mean=(0.485, 0.456, 0.406),
+    img_std=(0.229, 0.224, 0.225),
+    async_loading_frames=False,
+    compute_device=torch.device("cuda"),
+):
+    """
+    Load the video frames from a directory of image files ("<frame_index>.png" format).
+
+    The frames are resized to image_size x image_size and are loaded to GPU if
+    `offload_video_to_cpu` is `False` and to CPU if `offload_video_to_cpu` is `True`.
+    """
+    image_dict = video_path
+    num_frames = len(image_dict)
+    img_mean = torch.tensor(img_mean, dtype=torch.float32)[:, None, None]
+    img_std = torch.tensor(img_std, dtype=torch.float32)[:, None, None]
+
+    images = torch.zeros(num_frames, 3, image_size, image_size, dtype=torch.float32)
+    for n, (img_name, img_bgr) in enumerate(tqdm(image_dict.items(), desc="Frame loading")):
+        img = cv2.cvtColor(img_bgr.copy(), cv2.COLOR_BGR2RGB)
+        video_width, video_height = img.shape[1], img.shape[0]
+        img = cv2.resize(img, (image_size, image_size), interpolation=cv2.INTER_LANCZOS4)
+        if img.dtype == np.uint8:
+            img = img / 255.0
+        else:
+            raise RuntimeError(f"Unknown image dtype: {img.dtype} on {img_name}")
+        images[n] = torch.from_numpy(img).permute(2, 0, 1)
+    if not offload_video_to_cpu:
+        images = images.to(compute_device)
+        img_mean = img_mean.to(compute_device)
+        img_std = img_std.to(compute_device)
+    # normalize by mean and std
+    images -= img_mean
+    images /= img_std
+    return images, video_height, video_width
+
 
 def load_video_frames(
     video_path,
@@ -185,6 +225,7 @@ def load_video_frames(
     is_bytes = isinstance(video_path, bytes)
     is_str = isinstance(video_path, str)
     is_mp4_path = is_str and os.path.splitext(video_path)[-1] in [".mp4", ".MP4"]
+    is_dict = isinstance(video_path, dict)
     if is_bytes or is_mp4_path:
         return load_video_frames_from_video_file(
             video_path=video_path,
@@ -196,6 +237,16 @@ def load_video_frames(
         )
     elif is_str and os.path.isdir(video_path):
         return load_video_frames_from_jpg_images(
+            video_path=video_path,
+            image_size=image_size,
+            offload_video_to_cpu=offload_video_to_cpu,
+            img_mean=img_mean,
+            img_std=img_std,
+            async_loading_frames=async_loading_frames,
+            compute_device=compute_device,
+        )
+    elif is_dict:
+        return load_video_frames_from_images(
             video_path=video_path,
             image_size=image_size,
             offload_video_to_cpu=offload_video_to_cpu,
